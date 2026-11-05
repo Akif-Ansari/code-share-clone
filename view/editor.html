@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Live CodeShare</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%23000000'/><text x='50%' y='65%' dominant-baseline='middle' text-anchor='middle' font-family='monospace' font-weight='bold' font-size='55' fill='%23ffffff'>&lt;/&gt;</text></svg>"
+    />
+    <!-- Socket.IO client script automatically served by server -->
+    <script src="/socket.io/socket.io.js"></script>
+  </head>
+  <body>
+    <!-- Header Bar -->
+    <header class="app-header">
+      <a href="/new" class="logo-area" title="CodeShare - Start new session">
+        <div class="logo-badge">&lt;/&gt;</div>
+        <span class="logo-text">CodeShare</span>
+      </a>
+
+      <!-- Live Collaborators and Sync Status -->
+      <div style="display: flex; align-items: center; gap: 1rem">
+        <div class="live-badge" id="badge-users">
+          <span class="pulse-dot"></span>
+          <span id="users-count">1 user online</span>
+        </div>
+        <span id="sync-status" class="sync-status saved">● Saved</span>
+      </div>
+
+      <div class="header-actions">
+        <button
+          id="btn-copy-link"
+          class="btn btn-primary"
+          onclick="copyShareUrl()"
+        >
+          <svg
+            width="15"
+            height="15"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path
+              d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"
+            ></path>
+            <path
+              d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"
+            ></path>
+          </svg>
+          <span id="btn-copy-text">Share Link</span>
+        </button>
+
+        <a
+          id="btn-raw"
+          href="#"
+          target="_blank"
+          class="btn btn-secondary"
+          title="View raw plain text"
+        >
+          <span>Raw</span>
+        </a>
+
+        <a
+          href="/new"
+          class="btn btn-secondary"
+          title="Create a new blank codeshare session"
+        >
+          <span>+ New</span>
+        </a>
+      </div>
+    </header>
+
+    <!-- Interactive Live Toolbar -->
+    <div class="toolbar-container">
+      <div class="toolbar-group">
+        <input
+          type="text"
+          id="snippet-title"
+          class="input-title"
+          placeholder="Snippet Title (e.g. untitled.txt)"
+          autocomplete="off"
+        />
+      </div>
+
+      <div class="toolbar-group">
+        <span style="font-size: 0.8rem; color: var(--text-dim)">
+          Realtime live editing enabled • Anyone with link can collaborate
+        </span>
+      </div>
+    </div>
+
+    <!-- Live Collaborative Editor -->
+    <main class="editor-wrapper" style="height: calc(100vh - 120px)">
+      <div id="line-numbers" class="line-numbers">1</div>
+      <textarea
+        id="code-editor"
+        class="code-textarea"
+        placeholder="// Write or paste code here...&#10;// Changes sync in real-time to everyone on this link!"
+        spellcheck="false"
+        autofocus
+      ></textarea>
+    </main>
+
+    <div id="toast-container" class="toast-container"></div>
+
+    <script>
+      // Robust extraction of pasteId from URL (handles trailing slashes, queries)
+      function getPasteId() {
+        const cleanPath = window.location.pathname.replace(/^\/+|\/+$/g, "");
+        const parts = cleanPath.split("/").filter(Boolean);
+        return parts[parts.length - 1] || "";
+      }
+
+      const pasteId = getPasteId();
+      const codeEditor = document.getElementById("code-editor");
+      const lineNumbers = document.getElementById("line-numbers");
+      const snippetTitle = document.getElementById("snippet-title");
+      const usersCountEl = document.getElementById("users-count");
+      const syncStatusEl = document.getElementById("sync-status");
+      const btnRaw = document.getElementById("btn-raw");
+      const btnCopyText = document.getElementById("btn-copy-text");
+
+      if (btnRaw && pasteId) {
+        btnRaw.href = `/raw/${pasteId}`;
+      }
+
+      let saveTimeout = null;
+      let isIncomingChange = false;
+
+      // Connect to Socket.IO
+      const socket = io();
+
+      // Join room function that works on initial connect AND reconnects
+      function joinRoom() {
+        if (pasteId) {
+          socket.emit("join-room", pasteId);
+        }
+      }
+
+      socket.on("connect", () => {
+        joinRoom();
+      });
+
+      if (socket.connected) {
+        joinRoom();
+      }
+
+      // 2. Receive initial state from store
+      socket.on("init-document", (doc) => {
+        isIncomingChange = true;
+        try {
+          if (doc && doc.title) {
+            snippetTitle.value = doc.title;
+            document.title = `${doc.title} - CodeShare`;
+          }
+          if (doc && typeof doc.content === "string") {
+            codeEditor.value = doc.content;
+            updateLineNumbers();
+          }
+        } finally {
+          isIncomingChange = false;
+        }
+      });
+
+      // 3. Receive live code updates from other collaborators (bidirectional)
+      socket.on("code-update", (data) => {
+        const content = typeof data === "string" ? data : (data?.content ?? "");
+        if (codeEditor.value === content) return;
+
+        const currentStart = codeEditor.selectionStart;
+        const currentEnd = codeEditor.selectionEnd;
+
+        isIncomingChange = true;
+        try {
+          codeEditor.value = content;
+          updateLineNumbers();
+
+          // Restore cursor position safely
+          codeEditor.setSelectionRange(
+            Math.min(currentStart, content.length),
+            Math.min(currentEnd, content.length),
+          );
+        } catch (e) {
+          console.error("Error setting incoming content:", e);
+        } finally {
+          isIncomingChange = false;
+        }
+
+        showSync("Saved");
+      });
+
+      // 4. Receive live title updates
+      socket.on("title-update", (data) => {
+        const title = typeof data === "string" ? data : (data?.title ?? "");
+        if (title && snippetTitle.value !== title) {
+          snippetTitle.value = title;
+          document.title = `${title} - CodeShare`;
+        }
+      });
+
+      // 5. Receive live users count
+      socket.on("users-count", ({ count }) => {
+        if (usersCountEl) {
+          usersCountEl.textContent = `${count} user${count === 1 ? "" : "s"} online`;
+        }
+      });
+
+      // Handle user typing inside editor
+      codeEditor.addEventListener("input", () => {
+        if (isIncomingChange) return;
+
+        updateLineNumbers();
+        showSync("Syncing...");
+
+        socket.emit("code-change", {
+          pasteId,
+          content: codeEditor.value,
+        });
+
+        clearTimeout(saveTimeout);
+        saveTimeout = setTimeout(() => {
+          showSync("Saved");
+        }, 500);
+      });
+
+      // Handle Tab key indentation
+      codeEditor.addEventListener("keydown", (e) => {
+        if (e.key === "Tab") {
+          e.preventDefault();
+          const start = codeEditor.selectionStart;
+          const end = codeEditor.selectionEnd;
+          const indent = "  "; // 2 spaces
+
+          codeEditor.value =
+            codeEditor.value.substring(0, start) +
+            indent +
+            codeEditor.value.substring(end);
+          codeEditor.selectionStart = codeEditor.selectionEnd =
+            start + indent.length;
+          updateLineNumbers();
+
+          socket.emit("code-change", {
+            pasteId,
+            content: codeEditor.value,
+          });
+        }
+      });
+
+      // Handle Title change
+      snippetTitle.addEventListener("input", () => {
+        const title = snippetTitle.value.trim() || "Untitled Snippet";
+        document.title = `${title} - CodeShare`;
+        socket.emit("title-change", { pasteId, title });
+      });
+
+      // Update line numbers gutter & sync scroll
+      function updateLineNumbers() {
+        const lines = codeEditor.value.split("\n").length;
+        let lineHtml = "";
+        for (let i = 1; i <= Math.max(lines, 1); i++) {
+          lineHtml += `${i}<br>`;
+        }
+        lineNumbers.innerHTML = lineHtml;
+      }
+
+      codeEditor.addEventListener("scroll", () => {
+        lineNumbers.scrollTop = codeEditor.scrollTop;
+      });
+
+      // Copy share link helper
+      function copyShareUrl() {
+        const url = window.location.href;
+        navigator.clipboard.writeText(url).then(() => {
+          btnCopyText.textContent = "Copied! ✓";
+          showToast("Share link copied to clipboard");
+          setTimeout(() => {
+            btnCopyText.textContent = "Share Link";
+          }, 2500);
+        });
+      }
+
+      function showSync(state) {
+        if (!syncStatusEl) return;
+        if (state === "Syncing...") {
+          syncStatusEl.className = "sync-status saving";
+          syncStatusEl.textContent = "● Syncing...";
+        } else {
+          syncStatusEl.className = "sync-status saved";
+          syncStatusEl.textContent = "● Saved";
+        }
+      }
+
+      function showToast(message) {
+        const container = document.getElementById("toast-container");
+        if (!container) return;
+        const toast = document.createElement("div");
+        toast.className = "toast";
+        toast.textContent = message;
+        container.appendChild(toast);
+        setTimeout(() => {
+          toast.remove();
+        }, 3000);
+      }
+
+      updateLineNumbers();
+    </script>
+  </body>
+</html>

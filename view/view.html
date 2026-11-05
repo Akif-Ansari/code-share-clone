@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <script>
+      const id = window.location.pathname.split("/").pop();
+      if (id && id !== "view.html") {
+        window.location.replace(`/p/${id}`);
+      } else {
+        window.location.replace("/");
+      }
+    </script>
+    <title>Redirecting to Live CodeShare...</title>
+  </head>
+  <body>
+    <p>Redirecting to Live Collaborative Editor...</p>
+  </body>
+</html>
